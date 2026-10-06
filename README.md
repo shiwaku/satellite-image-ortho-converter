@@ -42,6 +42,21 @@ AROSICS（COREG_LOCAL）と同じ考え方ですが、AROSICS は GDAL の Pytho
 
 左側の高層住宅地で目立つ長い赤い矢印は、建物の倒れ込みによるずれです。地表の補正には使わないよう除いています。
 
+### 補正前後の比較
+
+黄色の線は参照写真から抽出したエッジです。衛星画像の地物と重なっていれば、位置が合っています。各画像は 300 m 四方です。
+
+| 地点 | 補正前 | 補正後 |
+| --- | --- | --- |
+| 市街地と運動場 | ![](docs/images/compare/5339K4_urban_before.jpg) | ![](docs/images/compare/5339K4_urban_after.jpg) |
+| 臨海部の工業地帯 | ![](docs/images/compare/5339K4_industrial_before.jpg) | ![](docs/images/compare/5339K4_industrial_after.jpg) |
+| 高層住宅地 | ![](docs/images/compare/5339K4_highrise_before.jpg) | ![](docs/images/compare/5339K4_highrise_after.jpg) |
+
+高層住宅地では、地表の道路は合っています。ただし高層棟の屋上は倒れ込んで写るため、補正後もずれて見えます。これはオルソ化していない画像では残る差です。
+
+出典：「令和８年台風25号による千葉県における豪雨に関する情報収集衛星画像に基づく加工処理画像」（内閣官房、[G空間情報センター](https://www.geospatial.jp/ckan/dataset/25)）をもとに、satcoreg で幾何補正・切り出し・エッジの重ね描きを行って作成しました。
+参照写真のエッジは、[地理院タイル（シームレス空中写真）](https://maps.gsi.go.jp/development/ichiran.html)を加工して作成しました。
+
 ## 使い方
 
 ```bash
@@ -85,4 +100,4 @@ uv run ruff check . && uv run ruff format .
 
 ## 利用条件
 
-元画像の利用は、内閣官房の利用規約（データセットページに記載）に従います。参照に使っている地理院タイルは、[国土地理院コンテンツ利用規約](https://www.gsi.go.jp/kikakuchousei/kikakuchousei40182.html)に従います。
+元画像（内閣官房の加工処理画像）の利用は、[内閣官房ホームページの利用ルール](https://www.cas.go.jp/jp/tyosakuken/index.html)（公共データ利用規約 第1.0版、PDL1.0）に従います。補正した画像を公開・配布するときは、出典に加えて、加工したことと加工した主体を明記してください。参照に使っている地理院タイルは、[国土地理院コンテンツ利用規約](https://www.gsi.go.jp/kikakuchousei/kikakuchousei40182.html)に従います。
