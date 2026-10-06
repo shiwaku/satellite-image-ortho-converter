@@ -69,9 +69,17 @@ uv run satcoreg download --mesh 5339K4 --date 20261001
 # タイポイント抽出 → 補正 → 検証
 uv run satcoreg run data/raw/5339K4_20261001_54N.tif
 
-# 複数図郭をまとめて処理
+# 複数図郭をまとめて処理（処理済みの図郭は飛ばします）
 uv run satcoreg run data/raw/*.tif
+
+# データセットから取得しながら全図郭を処理し、一覧表を作成
+uv run satcoreg batch
+uv run satcoreg report   # data/out/report.md と report.csv
 ```
+
+`batch` は、次の図郭をダウンロードしながら、取得済みの図郭を処理します。
+1 図郭で失敗しても止まらずに次へ進みます。結果は各図郭の `status.json` に記録します。
+一覧表では、採用点が 100 点未満の図郭と、補正後の残差の中央値が 2 m を超える図郭に「要確認」の印を付けます。
 
 `match` と `warp` は別々にも実行できます。
 `data/out/<画像名>/` に次のファイルを出力します。
