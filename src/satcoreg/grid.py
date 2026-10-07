@@ -7,6 +7,7 @@
 
 from dataclasses import dataclass
 
+import cv2
 import numpy as np
 import rasterio
 from affine import Affine
@@ -47,11 +48,38 @@ def valid_mask(rgb: np.ndarray) -> np.ndarray:
     return ~(black | white)
 
 
-def read_target(path: str, work_res: float) -> tuple[WorkGrid, np.ndarray, np.ndarray]:
-    """対象画像を作業グリッドに縮小して読む。戻り値は (grid, gray, valid)。"""
+CLOUD_MIN = 180  # 3 バンドとも この値を超え、
+CLOUD_CHROMA = 30  # かつ彩度（最大 - 最小）がこの値未満の画素を雲の候補とする
+CLOUD_MIN_SIZE_M = 20.0  # これより小さい明るい領域（白い屋根・裸地など）は雲とみなさない
+CLOUD_MARGIN_M = 15.0  # 雲の縁のもやも除くため、雲を広げる幅
+
+
+def _disk(radius_px: int) -> np.ndarray:
+    size = 2 * max(radius_px, 1) + 1
+    return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
+
+
+def cloud_mask(rgb: np.ndarray, res: float) -> np.ndarray:
+    """明るく色味の少ない、ある程度の広がりを持つ領域を雲とみなす。"""
+    mn, mx = rgb.min(axis=0), rgb.max(axis=0)
+    cand = ((mn > CLOUD_MIN) & ((mx.astype(np.int16) - mn) < CLOUD_CHROMA)).astype(np.uint8)
+    cloud = cv2.morphologyEx(cand, cv2.MORPH_OPEN, _disk(round(CLOUD_MIN_SIZE_M / 2 / res)))
+    return cv2.dilate(cloud, _disk(round(CLOUD_MARGIN_M / res))) > 0
+
+
+def read_target(
+    path: str, work_res: float, mask_clouds: bool = True
+) -> tuple[WorkGrid, np.ndarray, np.ndarray, float]:
+    """対象画像を作業グリッドに縮小して読む。戻り値は (grid, gray, valid, 雲の割合)。"""
     with rasterio.open(path) as src:
         grid = work_grid_for(src, work_res)
         rgb = src.read(
             [1, 2, 3], out_shape=(3, grid.height, grid.width), resampling=Resampling.average
         )
-    return grid, to_gray(rgb), valid_mask(rgb)
+    valid = valid_mask(rgb)
+    cloud_frac = 0.0
+    if mask_clouds:
+        cloud = cloud_mask(rgb, grid.res) & valid
+        cloud_frac = float(cloud.sum() / max(valid.sum(), 1))
+        valid &= ~cloud
+    return grid, to_gray(rgb), valid, cloud_frac

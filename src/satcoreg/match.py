@@ -3,18 +3,24 @@
 考え方は AROSICS の COREG_LOCAL と同じ。
 1. 作業グリッド上に等間隔の格子点を置く
 2. 各点で対象画像と参照画像から窓を切り出し、位相相関で相対ずれを求める
-3. 応答値・整合後の相関係数・近傍との一貫性・全体アフィンからの乖離で外れ値を除く
+3. 応答値・整合後の相関係数・全体の中央値や近傍との一貫性で外れ値を除く
+
+大きなずれ（数十 m）に備えて、先に縮小画像で粗いずれを測り（coarse_prior）、
+その予測分だけ参照窓をずらしてから細かいずれを測る。
 
 ずれ (dE, dN) は「対象画像上の地物位置 + (dE, dN) = 参照（地図）上の位置」となる量（m）。
 """
 
 import json
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import cv2
 import numpy as np
+from affine import Affine
 from rasterio.warp import transform as transform_coords
+from scipy.interpolate import RBFInterpolator
 from scipy.spatial import cKDTree
 
 from satcoreg.grid import WorkGrid
@@ -78,6 +84,9 @@ def estimate_shift(ref_win: np.ndarray, tgt_win: np.ndarray) -> tuple[float, flo
     return float(warp[0, 2] - k), float(warp[1, 2] - k), response, float(cc)
 
 
+Prior = Callable[[np.ndarray, np.ndarray], np.ndarray]
+
+
 def find_tie_points(
     grid: WorkGrid,
     tgt: np.ndarray,
@@ -85,30 +94,88 @@ def find_tie_points(
     ref: np.ndarray,
     ref_valid: np.ndarray,
     p: MatchParams,
+    prior: Prior | None = None,
 ) -> list[TiePoint]:
+    """格子点ごとにずれを測る。
+
+    prior を渡すと、その位置で予想される補正量 (dE, dN) [m] だけ参照窓をずらして切り出し、
+    残りのずれだけを測る。窓サイズを超える大きなずれでも窓どうしが重なるようにするため。
+    """
     half = p.window // 2
+    rows = np.arange(half, grid.height - half, p.spacing)
+    cols = np.arange(half, grid.width - half, p.spacing)
+    rr, cc = np.meshgrid(rows, cols, indexing="ij")
+    e_all, n_all = grid.transform @ (cc.ravel().astype(float), rr.ravel().astype(float))
+    pred = (
+        prior(np.asarray(e_all), np.asarray(n_all)) if prior is not None else np.zeros((rr.size, 2))
+    )
     points: list[TiePoint] = []
-    for r in range(half, grid.height - half, p.spacing):
-        for c in range(half, grid.width - half, p.spacing):
-            sl = (slice(r - half, r + half), slice(c - half, c + half))
-            if tgt_valid[sl].mean() < p.min_valid or ref_valid[sl].mean() < p.min_valid:
-                continue
-            tw, rw = tgt[sl], ref[sl]
-            if tw.std() < p.min_std or rw.std() < p.min_std:
-                continue
-            sx, sy, resp, ncc = estimate_shift(rw, tw)
-            e, n = grid.transform @ (c, r)
-            pt = TiePoint(c, r, e, n, -sx * grid.res, sy * grid.res, resp, ncc)
-            if resp < p.min_response:
-                pt.status = "low_response"
-            elif ncc < p.min_ncc:
-                pt.status = "low_ncc"
-            elif max(abs(sx), abs(sy)) > p.max_shift * p.window:
-                pt.status = "too_large"
-            points.append(pt)
+    for r, c, e, n, (pde, pdn) in zip(rr.ravel(), cc.ravel(), e_all, n_all, pred, strict=True):
+        # 予想される s（tgt(x) ≈ ref(x - s)）を整数画素で参照窓の位置に反映する
+        s0x, s0y = round(-pde / grid.res), round(pdn / grid.res)
+        rr0, rc0 = r - s0y, c - s0x
+        if not (half <= rr0 < grid.height - half and half <= rc0 < grid.width - half):
+            continue
+        tsl = (slice(r - half, r + half), slice(c - half, c + half))
+        rsl = (slice(rr0 - half, rr0 + half), slice(rc0 - half, rc0 + half))
+        if tgt_valid[tsl].mean() < p.min_valid or ref_valid[rsl].mean() < p.min_valid:
+            continue
+        tw, rw = tgt[tsl], ref[rsl]
+        if tw.std() < p.min_std or rw.std() < p.min_std:
+            continue
+        sx, sy, resp, ncc = estimate_shift(rw, tw)
+        pt = TiePoint(
+            float(c), float(r), float(e), float(n),
+            -(sx + s0x) * grid.res, (sy + s0y) * grid.res, resp, ncc,
+        )  # fmt: skip
+        if resp < p.min_response:
+            pt.status = "low_response"
+        elif ncc < p.min_ncc:
+            pt.status = "low_ncc"
+        elif max(abs(sx), abs(sy)) > p.max_shift * p.window:
+            pt.status = "too_large"
+        points.append(pt)
     _reject_global(points, grid.res, p)
     _reject_local(points, grid.res, p)
     return points
+
+
+def coarse_prior(
+    grid: WorkGrid,
+    tgt: np.ndarray,
+    tgt_valid: np.ndarray,
+    ref: np.ndarray,
+    ref_valid: np.ndarray,
+    factor: int = 4,
+    min_points: int = 6,
+) -> tuple[Prior | None, list[TiePoint]]:
+    """縮小画像（既定 4 倍＝4 m）で大きなずれを測り、なめらかな補正量の予測関数を返す。
+
+    窓 256 画素（1 km 四方）で ±250 m 程度までのずれを拾う。点が足りなければ None。
+    """
+    h, w = grid.height // factor, grid.width // factor
+
+    def shrink(a: np.ndarray) -> np.ndarray:
+        return cv2.resize(a.astype(np.float32), (w, h), interpolation=cv2.INTER_AREA)
+
+    cgrid = WorkGrid(grid.crs, grid.transform @ Affine.scale(factor), w, h)
+    cp = MatchParams(spacing=100, window=256, min_valid=0.8, local_tol_px=1.5, global_tol_px=40)
+    pts = find_tie_points(
+        cgrid, shrink(tgt), shrink(tgt_valid) > 0.5, shrink(ref), shrink(ref_valid) > 0.5, cp
+    )
+    ok = [pt for pt in pts if pt.status == "ok"]
+    if len(ok) < min_points:
+        return None, pts
+    xy = np.array([[pt.e, pt.n] for pt in ok])
+    d = np.array([[pt.de, pt.dn] for pt in ok])
+    origin = xy.mean(axis=0)
+    rbf = RBFInterpolator((xy - origin) / 1000.0, d, kernel="thin_plate_spline", smoothing=10.0)
+
+    def predict(e: np.ndarray, n: np.ndarray) -> np.ndarray:
+        q = (np.column_stack([e, n]) - origin) / 1000.0
+        return rbf(q)
+
+    return predict, pts
 
 
 def _reject_global(points: list[TiePoint], res: float, p: MatchParams) -> None:

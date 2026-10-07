@@ -10,7 +10,14 @@ import rasterio
 
 from satcoreg import catalog, report
 from satcoreg.grid import read_target, to_gray, valid_mask
-from satcoreg.match import MatchParams, find_tie_points, read_geojson, summarize, write_geojson
+from satcoreg.match import (
+    MatchParams,
+    coarse_prior,
+    find_tie_points,
+    read_geojson,
+    summarize,
+    write_geojson,
+)
 from satcoreg.reference import build_reference
 from satcoreg.warp import warp_image
 
@@ -40,7 +47,7 @@ def cmd_download(args: argparse.Namespace) -> None:
 
 def match_one(image: Path, args: argparse.Namespace, ref_path: Path) -> dict:
     t0 = time.perf_counter()
-    grid, tgt, tgt_valid = read_target(str(image), args.work_res)
+    grid, tgt, tgt_valid, cloud_frac = read_target(str(image), args.work_res)
     if ref_path.exists():
         with rasterio.open(ref_path) as src:
             ref_rgb = src.read()
@@ -48,9 +55,15 @@ def match_one(image: Path, args: argparse.Namespace, ref_path: Path) -> dict:
         ref_rgb = build_reference(
             grid, ref_path, zoom=args.zoom, cache_dir=args.cache, concurrency=args.tile_concurrency
         )
+    ref, ref_valid = to_gray(ref_rgb), valid_mask(ref_rgb)
+    prior, coarse = coarse_prior(grid, tgt, tgt_valid, ref, ref_valid)
     params = MatchParams(spacing=args.spacing, window=args.window)
-    points = find_tie_points(grid, tgt, tgt_valid, to_gray(ref_rgb), valid_mask(ref_rgb), params)
-    summary = summarize(points) | {"seconds": round(time.perf_counter() - t0, 1)}
+    points = find_tie_points(grid, tgt, tgt_valid, ref, ref_valid, params, prior=prior)
+    summary = summarize(points) | {
+        "cloud_frac": round(cloud_frac, 3),
+        "coarse_ok": sum(pt.status == "ok" for pt in coarse),
+        "seconds": round(time.perf_counter() - t0, 1),
+    }
     return {"grid": grid, "points": points, "summary": summary}
 
 
@@ -176,7 +189,9 @@ def main() -> None:
 
     def add_warp_args(sp: argparse.ArgumentParser) -> None:
         sp.add_argument("--smoothing", type=float, default=0.1, help="TPS の平滑化")
-        sp.add_argument("--min-points", type=int, default=10)
+        sp.add_argument(
+            "--min-points", type=int, default=50, help="これより採用点が少ない図郭は補正しない"
+        )
         sp.add_argument("--compress", default="DEFLATE", help="COG の圧縮 (DEFLATE / JPEG など)")
         sp.add_argument("--no-verify", dest="verify", action="store_false")
 

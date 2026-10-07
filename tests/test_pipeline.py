@@ -4,7 +4,7 @@ from affine import Affine
 from scipy.ndimage import gaussian_filter, shift
 
 from satcoreg.grid import WorkGrid, read_target, to_gray
-from satcoreg.match import MatchParams, estimate_shift, find_tie_points
+from satcoreg.match import MatchParams, coarse_prior, estimate_shift, find_tie_points
 from satcoreg.warp import warp_image
 
 CRS = "EPSG:32654"
@@ -58,9 +58,37 @@ def test_warp_moves_image_back(tmp_path):
     out_path = tmp_path / "out.tif"
     warp_image(src_path, pts, out_path, smoothing=0.0)
 
-    _, out_gray, _ = read_target(str(out_path), 0.4)
+    _, out_gray, _, _ = read_target(str(out_path), 0.4, mask_clouds=False)
     inner = (slice(50, -50), slice(50, -50))
     diff = np.abs(
         out_gray[inner] - to_gray(np.repeat(base[None].astype(np.uint8), 3, axis=0))[inner]
     )
     assert diff.mean() < 2.0
+
+
+def test_coarse_prior_recovers_large_offset():
+    h = w = 2400
+    rng = np.random.default_rng(3)
+    # 縮小しても模様が残るよう、細かい模様と粗い模様を重ねる
+    img = gaussian_filter(rng.normal(size=(h, w)), 1) + 3 * gaussian_filter(
+        rng.normal(size=(h, w)), 8
+    )
+    ref = ((img - img.min()) / (img.max() - img.min()) * 200 + 20).astype(np.float32)
+    tgt = shift(ref, (-45, 70), order=1, mode="nearest")  # 北に 45 px、東に 70 px
+    grid = WorkGrid(rasterio.crs.CRS.from_string(CRS), Affine(1, 0, 400000, 0, -1, 3940000), w, h)
+    valid = np.ones((h, w), bool)
+    params = MatchParams(spacing=200, window=256)
+
+    without = find_tie_points(grid, tgt, valid, ref, valid, params)
+    assert sum(p.status == "ok" for p in without) < 5  # 窓の 1/4 を超えるずれは拾えない
+
+    prior, _ = coarse_prior(grid, tgt, valid, ref, valid)
+    assert prior is not None
+    ok = [
+        p
+        for p in find_tie_points(grid, tgt, valid, ref, valid, params, prior=prior)
+        if p.status == "ok"
+    ]
+    assert len(ok) > 50
+    assert abs(np.median([p.de for p in ok]) + 70) < 0.2
+    assert abs(np.median([p.dn for p in ok]) + 45) < 0.2

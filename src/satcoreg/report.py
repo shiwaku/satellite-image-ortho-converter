@@ -8,11 +8,13 @@ from satcoreg.catalog import NAME_RE
 
 MIN_POINTS = 100  # これより採用点が少ない図郭は目視確認に回す
 MAX_RESIDUAL_M = 2.0  # 補正後の残差中央値がこれを超える図郭は目視確認に回す
+MAX_CLOUD = 0.5  # 雲の割合がこれを超える図郭は目視確認に回す
 
 COLUMNS = [
     ("mesh", "図郭"),
     ("date", "撮像日"),
     ("status", "状態"),
+    ("cloud", "雲の割合"),
     ("candidates", "候補点"),
     ("ok_before", "採用点"),
     ("shift_median", "補正前 中央値 (m)"),
@@ -40,6 +42,7 @@ def collect(out_dir: Path) -> list[dict]:
             "mesh": m["mesh"].upper(),
             "date": m["date"],
             "status": status.get("status", "running" if match else "pending"),
+            "cloud": match.get("cloud_frac", ""),
             "candidates": match.get("candidates", ""),
             "ok_before": match.get("status", {}).get("ok", ""),
             "shift_median": match.get("shift_m_median", ""),
@@ -52,6 +55,8 @@ def collect(out_dir: Path) -> list[dict]:
             reasons.append(status.get("reason") or status.get("error") or row["status"])
         if isinstance(row["ok_before"], int) and row["ok_before"] < MIN_POINTS:
             reasons.append(f"採用点 {row['ok_before']}")
+        if isinstance(row["cloud"], float) and row["cloud"] > MAX_CLOUD:
+            reasons.append(f"雲 {row['cloud']:.0%}")
         if isinstance(row["resid_median"], float) and row["resid_median"] > MAX_RESIDUAL_M:
             reasons.append(f"残差 {row['resid_median']} m")
         row["check"] = " / ".join(reasons)
